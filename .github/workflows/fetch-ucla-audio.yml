@@ -1,8 +1,8 @@
 name: Fetch UCLA audio
 
 on:
-  pull_request:
-    branches: [main]
+  push:
+    branches: [tmp-ucla-audio-20260712]
 
 permissions:
   contents: read
@@ -14,90 +14,79 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch manifests and audio
+      - name: Fetch manifest and audio
         shell: bash
         run: |
           set -u
           mkdir -p out
           UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126 Safari/537.36'
+          ARK='z18h0m6p'
+          MANIFEST="out/${ARK}.json"
 
-          fetch_one() {
-            local ark="$1"
-            local dest="out/${ark}.json"
-            local urls=(
-              "https://iiif.library.ucla.edu/ark%3A%2F21198%2F${ark}/manifest"
-              "https://iiif.library.ucla.edu/ark:/21198/${ark}/manifest"
-              "https://ingest.iiif.library.ucla.edu/ark%3A%2F21198%2F${ark}/manifest"
-              "https://r.jina.ai/https://iiif.library.ucla.edu/ark%3A%2F21198%2F${ark}/manifest"
-            )
-            for url in "${urls[@]}"; do
-              echo "Trying $url" | tee -a out/fetch.log
-              if curl -L --fail --retry 3 --connect-timeout 20 --max-time 120 -A "$UA" -H 'Accept: application/json,*/*' "$url" -o "$dest"; then
-                if python - "$dest" <<'PY'
+          urls=(
+            "https://iiif.library.ucla.edu/ark%3A%2F21198%2F${ARK}/manifest"
+            "https://iiif.library.ucla.edu/ark:/21198/${ARK}/manifest"
+            "https://ingest.iiif.library.ucla.edu/ark%3A%2F21198%2F${ARK}/manifest"
+            "https://r.jina.ai/https://iiif.library.ucla.edu/ark%3A%2F21198%2F${ARK}/manifest"
+          )
+
+          : > out/fetch.log
+          for url in "${urls[@]}"; do
+            echo "Trying $url" | tee -a out/fetch.log
+            if curl -L --fail --retry 3 --connect-timeout 20 --max-time 120 \
+              -A "$UA" -H 'Accept: application/json,*/*' "$url" -o "$MANIFEST"; then
+              if python - "$MANIFEST" <<'PY'
 import json, sys
-p=sys.argv[1]
-try:
-    json.load(open(p, encoding='utf-8'))
-except Exception:
-    raise SystemExit(1)
+json.load(open(sys.argv[1], encoding='utf-8'))
 PY
-                then
-                  echo "Fetched valid JSON: $url" | tee -a out/fetch.log
-                  return 0
-                fi
+              then
+                echo "Fetched valid JSON: $url" | tee -a out/fetch.log
+                break
               fi
-            done
-            echo "Could not fetch manifest for $ark" | tee -a out/fetch.log
-            return 1
-          }
-
-          fetch_one z1cp1x0r || true
-          fetch_one z1fj4h8r || true
+            fi
+          done
 
           curl -L --fail --retry 2 --max-time 120 -A "$UA" \
-            'https://digital.library.ucla.edu/catalog/ark:/21198/z1cp1x0r' \
+            'https://digital.library.ucla.edu/catalog/ark:/21198/z18h0m6p' \
             -o out/catalog.html || true
 
           python <<'PY'
 import json, pathlib, re
-out = pathlib.Path('out')
-priority=[]
-other=[]
+out=pathlib.Path('out')
+priority=[]; other=[]
 
-def walk(x, path=()):
-    if isinstance(x, dict):
-        fmt = str(x.get('format','')).lower()
-        typ = str(x.get('type','')).lower()
+def add(u, high=False):
+    if not isinstance(u,str) or not u.startswith(('http://','https://')):
+        return
+    (priority if high else other).append(u)
+
+def walk(x):
+    if isinstance(x,dict):
+        fmt=str(x.get('format','')).lower()
+        typ=str(x.get('type','')).lower()
         for k,v in x.items():
-            if k in ('id','@id') and isinstance(v,str) and v.startswith(('http://','https://')):
-                if fmt.startswith('audio/') or typ in ('sound','audio'):
-                    priority.append(v)
-                elif any(s in v.lower() for s in ('wowza','audio','.mp3','.mp4','.m4a','.wav','.m3u8')):
-                    other.append(v)
-            walk(v, path+(str(k),))
-    elif isinstance(x, list):
-        for i,v in enumerate(x): walk(v, path+(str(i),))
+            if k in ('id','@id'):
+                add(v, fmt.startswith('audio/') or typ in ('sound','audio'))
+            walk(v)
+    elif isinstance(x,list):
+        for v in x: walk(v)
     elif isinstance(x,str):
-        for u in re.findall(r'https?://[^\s\"<>]+', x):
-            u=u.rstrip('),]}')
+        for u in re.findall(r'https?://[^\s\"<>]+',x):
             if any(s in u.lower() for s in ('wowza','audio','.mp3','.mp4','.m4a','.wav','.m3u8')):
-                other.append(u)
+                add(u.rstrip('),]}'))
 
-for p in out.glob('*.json'):
-    try:
-        data=json.load(open(p,encoding='utf-8'))
-        walk(data)
-    except Exception as e:
-        print(f'{p}: {e}')
+p=out/'z18h0m6p.json'
+if p.exists():
+    try: walk(json.load(open(p,encoding='utf-8')))
+    except Exception as e: print('manifest parse error',e)
 
-# Search HTML as a fallback.
 h=out/'catalog.html'
 if h.exists():
     text=h.read_text(errors='ignore')
-    for u in re.findall(r'https?://[^\s\"<>]+', text):
+    for u in re.findall(r'https?://[^\s\"<>]+',text):
         u=u.replace('&amp;','&').rstrip('),]}')
         if any(s in u.lower() for s in ('wowza','audio','.mp3','.mp4','.m4a','.wav','.m3u8')):
-            other.append(u)
+            add(u)
 
 seen=set(); ordered=[]
 for u in priority+other:
@@ -109,38 +98,23 @@ PY
 
           : > out/attempts.log
           found=0
-          n=0
           while IFS= read -r url; do
             [ -n "$url" ] || continue
-            n=$((n+1))
-            echo "[$n] $url" | tee -a out/attempts.log
-
-            # ffmpeg handles direct MP4/MP3 and HLS URLs.
+            echo "$url" | tee -a out/attempts.log
             if timeout 600 ffmpeg -nostdin -y -loglevel warning \
-                -user_agent "$UA" -i "$url" -vn -codec:a libmp3lame -q:a 2 \
-                out/ias_meap_1967_b_0268.mp3 >>out/attempts.log 2>&1; then
-              if [ -s out/ias_meap_1967_b_0268.mp3 ]; then
+              -user_agent "$UA" -i "$url" -vn -codec:a libmp3lame -q:a 2 \
+              out/Iyere_Ifa_Ile_Awo_Osogbo.mp3 >>out/attempts.log 2>&1; then
+              if [ -s out/Iyere_Ifa_Ile_Awo_Osogbo.mp3 ]; then
                 found=1
                 break
-              fi
-            fi
-
-            # Fallback: download first, then convert.
-            rm -f out/source_media
-            if curl -L --fail --retry 2 --connect-timeout 20 --max-time 600 -A "$UA" "$url" -o out/source_media >>out/attempts.log 2>&1; then
-              if timeout 600 ffmpeg -nostdin -y -loglevel warning -i out/source_media -vn \
-                  -codec:a libmp3lame -q:a 2 out/ias_meap_1967_b_0268.mp3 >>out/attempts.log 2>&1; then
-                if [ -s out/ias_meap_1967_b_0268.mp3 ]; then
-                  found=1
-                  break
-                fi
               fi
             fi
           done < out/audio_urls.txt
 
           if [ "$found" -eq 1 ]; then
             ffprobe -v error -show_entries format=duration,size,format_name \
-              -of default=noprint_wrappers=1 out/ias_meap_1967_b_0268.mp3 > out/audio_info.txt || true
+              -of default=noprint_wrappers=1 out/Iyere_Ifa_Ile_Awo_Osogbo.mp3 \
+              > out/audio_info.txt || true
             echo 'Audio downloaded successfully.' | tee -a out/fetch.log
           else
             echo 'No downloadable audio URL succeeded.' | tee -a out/fetch.log
