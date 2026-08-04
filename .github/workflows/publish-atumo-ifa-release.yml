@@ -37,3 +37,12 @@ jobs:
               --title 'Atumo Ifa — Irete Ofun (1969)' \
               --notes 'Public-domain archival recording from the Institute of African Studies, University of Ibadan. Converted from the UCLA Library HLS stream to MP3.'
           fi
+
+      - name: Record successful publication
+        run: |
+          printf 'Release asset published successfully.\nhttps://github.com/YuriTheCoder/archive-book-liberator/releases/download/atumo-ifa-1969/Atumo_Ifa_Irete_Ofun_1969.mp3\n' > release-ready.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add release-ready.txt
+          git commit -m 'Confirm Atumo Ifa release asset'
+          git push origin HEAD:atumo-ifa-audio-download
